@@ -1,0 +1,32 @@
+---
+- name: Configure PCS Stonith for Bare Metal Hosts
+  hosts: localhost # This playbook runs on the Ansible control node
+  connection: local
+  gather_facts: false # No need to gather facts for localhost
+
+  # Ensure the kubernetes.core collection is installed:
+  # ansible-galaxy collection install kubernetes.core
+  collections:
+    - kubernetes.core
+
+  tasks:
+    - name: Get all Bare Metal Host (BMH) CRs from openshift-machine-api namespace
+      kubernetes.core.k8s_info:
+        api_version: metal3.io/v1alpha1
+        kind: BareMetalHost
+        namespace: openshift-machine-api
+      register: bmh_crs_output
+
+    - name: Set fact for BMH names, sorted alphabetically
+      # Extract only the names from the BMH resources
+      set_fact:
+        bmh_names: "{{ bmh_crs_output.resources | map(attribute='metadata.name') | sort }}"
+      when: bmh_crs_output.resources is defined and bmh_crs_output.resources | length > 0
+
+    - name: Process each Bare Metal Host found
+      # Delegate process_bmh.yml to process each BMH for better organization
+      include_tasks: process_bmh.yml
+      loop: "{{ bmh_names }}"
+      loop_control:
+        loop_var: current_bmh_name # This will be used by process_bmh.yml
+      when: bmh_names is defined and bmh_names | length > 0

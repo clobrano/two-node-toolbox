@@ -1,0 +1,136 @@
+---
+- name: Get detailed information for BMH {{ current_bmh_name }}
+  # Get full details for the current BMH being processed in the loop
+  kubernetes.core.k8s_info:
+    api_version: metal3.io/v1alpha1
+    kind: BareMetalHost
+    namespace: openshift-machine-api
+    name: "{{ current_bmh_name }}"
+  register: bmh_detail
+
+- name: Extract node name and IP address
+  block:
+    - name: Set node_name from BMH status
+      # The associated node's hostname will be used to name the redfish resource and for the pcmk_host_list
+      set_fact:
+        node_name: "{{ bmh_detail.resources[0].status.hardware.hostname }}"
+      when: bmh_detail.resources[0].status.hardware.hostname is defined
+
+    - name: Get node details for {{ node_name }} to find its IP
+      # The node details will be used to get the node's IP
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+        name: "{{ node_name }}"
+      register: node_detail
+      when: node_name is defined
+
+    - name: Set node_ip (preferring InternalIP)
+      set_fact:
+        node_ip: "{{ node_detail.resources[0].status.addresses | selectattr('type', 'equalto', 'InternalIP') | map(attribute='address') | first }}"
+      when: node_detail.resources[0].status.addresses is defined and node_detail.resources[0].status.addresses | length > 0
+  when: bmh_detail.resources is defined and bmh_detail.resources | length > 0
+
+- name: Extract BMC address components (IP, Port, Hash) for {{ current_bmh_name }}
+  set_fact:
+    credentials_secret_name: "{{ bmh_detail.resources[0].spec.bmc.credentialsName }}"
+    bmc_address_full: "{{ bmh_detail.resources[0].spec.bmc.address }}"
+    bmc_ip: "{{ bmh_detail.resources[0].spec.bmc.address | regex_search('\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b') }}"
+    bmc_port: "{{ bmh_detail.resources[0].spec.bmc.address | regex_search('(?<=\\:)(\\d+)') }}"
+    bmc_hash: "{{ bmh_detail.resources[0].spec.bmc.address | split('/') | last }}"
+  when: bmh_detail.resources is defined and bmh_detail.resources | length > 0
+
+- name: Get BMC credentials secret details for {{ credentials_secret_name }}
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: Secret
+    namespace: openshift-machine-api
+    name: "{{ credentials_secret_name }}"
+  register: credentials_secret_detail
+  when: credentials_secret_name is defined
+
+- name: Decode BMC username and password from base64
+  set_fact:
+    bmc_username: "{{ credentials_secret_detail.resources[0].data.username | b64decode }}"
+    bmc_password: "{{ credentials_secret_detail.resources[0].data.password | b64decode }}"
+  no_log: false # IMPORTANT: Prevent sensitive data from being logged in plain text
+  when: credentials_secret_detail.resources is defined and credentials_secret_detail.resources | length > 0
+
+- name: Determine if SSL certificate verification should be disabled
+  set_fact:
+    ssl_insecure_param: "ssl_insecure=1"
+  when: bmh_detail.resources[0].spec.bmc.disableCertificateVerification | default(false) | bool
+
+- name: Ensure the redfish stonith resource does not exist already on {{ node_name }}
+  # Using the delegate_to verb would free us from using ssh directly, however the environment where
+  # delegate_to runs the command is unable to see pcs script, regardless using pcs, /usr/sbin/pcs, /sbin/pcs
+  # and even trying to execute it via python interpreter
+  ansible.builtin.shell: |
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    core@{{ node_ip }} "sudo pcs stonith status {{ node_name }}_redfish"
+  register: pcs_stonith_status_result
+  ignore_errors: true # Crucial for debugging to see stdout/stderr even if the SSH command itself fails
+  changed_when: false # This task doesn't change system state
+  when:
+    - node_ip is defined
+    - node_name is defined # Ensure these are defined before attempting to run SSH
+
+# Uncomment the following to debug pcs stonith status output
+#- name: Debug Output of SSH from localhost command
+  #debug:
+    #var: pcs_stonith_status_result
+  #when: pcs_stonith_status_result is defined
+
+
+- name: Create PCS stonith resource on node {{ node_name }} ({{ node_ip }}) if it doesn't exist
+  # Using the delegate_to verb would free us from using ssh directly, however the environment where
+  # delegate_to runs the command is unable to see pcs script, regardless using pcs, /usr/sbin/pcs, /sbin/pcs
+  # and even trying to execute it via python interpreter
+  ansible.builtin.shell: |
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    core@{{ node_ip }} "sudo pcs stonith create {{ node_name }}_redfish fence_redfish \
+      username={{ bmc_username }} password={{ bmc_password }} \
+      ip={{ bmc_ip }} ipport={{ bmc_port }} \
+      systems_uri=/redfish/v1/Systems/{{ bmc_hash }} \
+      pcmk_host_list={{ node_name }} {{ ssl_insecure_param | default('') }}"
+  no_log: false
+  register: pcs_stonith_create_result
+  when:
+    - node_ip is defined
+    - bmc_username is defined
+    - bmc_password is defined
+    - bmc_ip is defined
+    - bmc_port is defined
+    - bmc_hash is defined
+    - node_name is defined
+    # This task runs ONLY if the pcs stonith status was not able to find the resource
+    - pcs_stonith_status_result.rc == 1
+
+# Uncomment the following to debug pcs stonith create output
+#- name: Debug pcs stonith create
+  #debug:
+    #var: pcs_stonith_create_result
+  #when: pcs_stonith_create_result is defined
+
+
+- name: Enable PCS stonith on node {{ node_name }}
+  # Using the delegate_to verb would free us from using ssh directly, however the environment where
+  # delegate_to runs the command is unable to see pcs script, regardless using pcs, /usr/sbin/pcs, /sbin/pcs
+  # and even trying to execute it via python interpreter
+  ansible.builtin.shell: |
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    core@{{ node_ip }} "sudo pcs property set stonith-enabled=true"
+  no_log: false
+  register: pcs_stonith_enable_result
+  when:
+    - node_ip is defined
+    - pcs_stonith_create_result.rc == 0
+
+# Uncomment the following to debug pcs stonith create output
+#- name: Debug pcs stonith create
+  #debug:
+    #var: pcs_stonith_create_result
+  #when: pcs_stonith_create_result is defined
+
+
+
