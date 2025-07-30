@@ -15,7 +15,7 @@ This directory contains scripts and playbooks for patching OpenShift cluster nod
 
 ### For resource-agents-patch.yml
 - Ansible
-- Inventory file with OpenShift nodes
+- Inventory file containing OpenShift cluster nodes (separate from hypervisor deployment inventory, see `inventory_ocp_hosts.sample`)
 - SSH access configured for `core` user
 
 ## Usage
@@ -36,8 +36,10 @@ This directory contains scripts and playbooks for patching OpenShift cluster nod
 ### Ansible Playbook
 
 ```bash
-ansible-playbook -i inventory_file resource-agents-patch.yml -e rpm_full_path=/path/to/package.rpm
+ansible-playbook -i inventory_ocp_hosts resource-agents-patch.yml -e rpm_full_path=/path/to/package.rpm
 ```
+
+**Note**: The inventory file should list the OpenShift cluster nodes (VMs), not the hypervisor host. Copy `inventory_ocp_hosts.sample` to `inventory_ocp_hosts` and update with your cluster node IPs.
 
 **Process:**
 1. Validates RPM file existence
