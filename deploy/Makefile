@@ -78,6 +78,17 @@ fencing-kcli:
 
 patch-nodes:
 	@./openshift-clusters/scripts/patch-nodes.sh
+
+ssh-node:
+ifndef node
+	@echo "Usage: make ssh-node node=<0|1> [cmd=\"command\"]"
+	@echo "Examples:"
+	@echo "  make ssh-node node=0"
+	@echo "  make ssh-node node=1 cmd=\"sudo pcs status\""
+	@exit 1
+endif
+	@./openshift-clusters/scripts/ssh-node.sh $(node) $(cmd)
+
 get-tnf-logs:
 	@./openshift-clusters/scripts/get-tnf-logs.sh
 
@@ -117,5 +128,7 @@ help:
 	@echo "  patch-nodes          - Build resource-agents RPM and patch cluster nodes (default version: 4.11)"
 	@echo ""
 	@echo "Cluster Utilities:"
-	@echo "  get-tnf-logs         - Collect pacemaker and etcd logs from cluster nodes"
+	@echo "  ssh-node node=<0|1> [cmd=\"..\"] - SSH into cluster node"
+	@echo "                                    e.g. make ssh-node node=0 cmd=\"sudo pcs status\""
+	@echo "  get-tnf-logs                    - Collect pacemaker and etcd logs from cluster nodes"
 
